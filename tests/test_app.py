@@ -386,6 +386,7 @@ def test_index_compresses_without_changing_cache_or_security_headers(site):
     assert response.status_code == 200
     assert response.headers['content-encoding'] == 'gzip'
     assert response.headers['vary'] == 'Accept-Encoding'
+    assert response.headers['cache-control'] == 'no-store'
     assert 'unsafe-inline' not in response.headers['content-security-policy']
     assert 'name="token" value="' in response.text
 

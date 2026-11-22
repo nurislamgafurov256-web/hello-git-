@@ -4,11 +4,6 @@ const button = form.querySelector('button');
 const token = form.elements.token;
 const { name, phone, door, comment, consent } = form.elements;
 const fields = [name, phone, door, comment, consent];
-const required = new Map([
-  [name, 'Укажите ваше имя.'],
-  [phone, 'Укажите российский номер телефона.'],
-  [consent, 'Подтвердите согласие на обработку персональных данных.'],
-]);
 const descriptions = new Map(fields.map(field => [field, (field.getAttribute('aria-describedby') || '')
   .split(' ').filter(id => id && id !== `${field.id}-error`)]));
 let submitting = false;
@@ -34,6 +29,19 @@ function focusError(field, message) {
   else field.focus();
 }
 
+function invalidField() {
+  const nameLength = Array.from(name.value.trim()).length;
+  if (nameLength < 2 || nameLength > 250) return [name, 'Введите имя от 2 до 250 символов.'];
+  const number = phone.value.trim().replace(/^(?:тел\.?|телефон|tel|phone)\s*:\s*/i, '');
+  const digits = number.replace(/\D/g, '');
+  const complete = number.startsWith('+') ? /^7\d{10}$/.test(digits) : /^(?:\d{10}|[78]\d{10})$/.test(digits);
+  if (!/^\+?[0-9().\s-]+$/.test(number) || !complete) {
+    return [phone, 'Укажите российский номер телефона, например +7 (999) 123-45-67.'];
+  }
+  if (!consent.checked) return [consent, 'Подтвердите согласие на обработку персональных данных.'];
+  return null;
+}
+
 async function sendLead(data) {
   const response = await fetch(form.action, {
     method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data),
@@ -56,9 +64,9 @@ form.addEventListener('submit', async event => {
   if (submitting) return;
   statusLine.textContent = '';
   fields.forEach(field => showFieldError(field, ''));
-  const missing = [...required.keys()].find(field => field === consent ? !consent.checked : !field.value.trim());
-  if (missing) {
-    focusError(missing, required.get(missing));
+  const invalid = invalidField();
+  if (invalid) {
+    focusError(...invalid);
     return;
   }
   submitting = true;
