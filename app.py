@@ -10,14 +10,33 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from string import Template
+from urllib.parse import parse_qs
 from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 ROOT = Path(__file__).parent
+DOORS = ('Секционные', 'Рулонные', 'Распашные')
+ACCEPTED = 'Спасибо! Заявка принята. Специалист скоро вам позвонит.'
+DUPLICATE = 'Заявка с этим номером уже принята. Мы скоро позвоним.'
+FORM_CONTENT_TYPE = 'application/x-www-form-urlencoded'
+
+
+def normalize_phone(value):
+    value = re.sub(r'^(?:тел\.?|телефон|tel|phone)\s*:\s*', '', value.strip(), flags=re.I)
+    if not re.fullmatch(r'\+?[0-9().\s-]+', value):
+        return None
+    digits = re.sub(r'[^0-9]', '', value)
+    if value.startswith('+'):
+        return '+' + digits if re.fullmatch(r'7[0-9]{10}', digits) else None
+    if len(digits) == 10:
+        return '+7' + digits
+    if re.fullmatch(r'[78][0-9]{10}', digits):
+        return '+7' + digits[1:]
 
 
 def create_app(db_path=None):
@@ -32,15 +51,42 @@ def create_app(db_path=None):
     def signature(stamp):
         return hmac.new(secret.encode(), stamp.encode(), hashlib.sha256).hexdigest()
 
+    def new_token():
+        stamp = str(time.time())
+        return f'{stamp}.{signature(stamp)}'
+
+    def render_form(values=None, message='', code=200, field='', form_token=None):
+        values = values or {}
+        fields = {key: html.escape(values.get(key, '')) for key in ('name', 'phone', 'comment')}
+        fields.update({f'{key}_error': 'aria-invalid="true" aria-describedby="form-status" autofocus' if key == field else ''
+                       for key in ('name', 'phone', 'door', 'comment', 'consent')})
+        fields.update({f'door_{index}': 'selected' if values.get('door') == door else ''
+                       for index, door in enumerate(DOORS, 1)})
+        page = Template((ROOT / 'index.html').read_text(encoding='utf-8'))
+        return HTMLResponse(page.substitute(
+            fields, message=html.escape(message), form_token=html.escape(form_token or new_token()),
+            consent='checked' if values.get('consent') is True else '',
+        ), status_code=code)
+
+    def is_form(request):
+        return request.headers.get('content-type', '').split(';', 1)[0].strip().lower() == FORM_CONTENT_TYPE
+
     @app.middleware('http')
     async def protect(request, call_next):
+        native = is_form(request)
+        limit = 12288 if native else 8192
         body = b''
         async for chunk in request.stream():
+            if len(body) + len(chunk) > limit:
+                if native and request.method == 'POST' and request.url.path == '/api/lead':
+                    response = render_form(message='Заявка слишком большая. Заполните форму ещё раз и сократите длинные поля.', code=413)
+                else:
+                    response = JSONResponse({'detail': 'Слишком большой запрос'}, status_code=413)
+                break
             body += chunk
-            if len(body) > 8192:
-                return JSONResponse({'detail': 'Слишком большой запрос'}, status_code=413)
-        request._body = body
-        response = await call_next(request)
+        else:
+            request._body = body
+            response = await call_next(request)
         response.headers.update({
             'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
             'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff',
@@ -51,40 +97,69 @@ def create_app(db_path=None):
 
     @app.get('/api/form-token')
     def token():
-        stamp = str(time.time())
-        return {'token': f'{stamp}.{signature(stamp)}'}
+        return {'token': new_token()}
 
     @app.post('/api/lead')
     async def lead(request: Request):
-        def error(message, code=400):
-            return JSONResponse({'detail': message}, status_code=code)
+        native = is_form(request)
+        data = {}
+
+        def error(message, code=400, *, field='', retry_token=None, form_token=None):
+            if native:
+                return render_form(data, message, code, field, retry_token or form_token)
+            result = {'detail': message}
+            if field:
+                result['field'] = field
+            if retry_token:
+                result['retry_token'] = retry_token
+            return JSONResponse(result, status_code=code)
+
+        def accepted():
+            if native:
+                return RedirectResponse('/?lead=accepted#lead', status_code=303)
+            return {'ok': True}
+
         try:
-            data = await request.json()
+            if native:
+                values = parse_qs((await request.body()).decode(), keep_blank_values=True)
+                data = {key: value[-1] for key, value in values.items()}
+                data['consent'] = data.get('consent') == 'on'
+            else:
+                data = await request.json()
         except (ValueError, UnicodeDecodeError):
             return error('Некорректный запрос')
         if not isinstance(data, dict):
             return error('Некорректный запрос')
         if data.get('website'):
-            return {'ok': True}
-        try:
-            stamp, digest = data['token'].rsplit('.', 1)
-            age = time.time() - float(stamp)
-            if not hmac.compare_digest(signature(stamp), digest) or not 3 <= age <= 7200:
-                return error('Обновите форму и подождите несколько секунд')
-        except (KeyError, ValueError, TypeError, AttributeError):
-            return error('Обновите форму и попробуйте ещё раз')
+            return accepted()
         name, phone, comment, door = (data.get(key, '') for key in ('name', 'phone', 'comment', 'door'))
         if not all(isinstance(v, str) for v in (name, phone, comment, door)):
             return error('Проверьте поля формы')
         name = name.strip()
-        digits = re.sub(r'[^0-9]', '', phone)
-        if len(digits) == 11 and digits[0] == '8':
-            digits = '7' + digits[1:]
-        if not re.fullmatch(r'7[0-9]{10}', digits) or re.search(r'[^0-9+()\s-]', phone):
-            return error('Укажите российский номер телефона')
-        phone = '+' + digits
-        if not 2 <= len(name) <= 60 or len(comment) > 500 or door not in ('', 'Секционные', 'Рулонные', 'Распашные') or data.get('consent') is not True:
-            return error('Проверьте имя, комментарий и согласие на обработку данных')
+        if not name:
+            return error('Укажите ваше имя.', field='name', form_token=data.get('token'))
+        if not 2 <= len(name) <= 250:
+            return error('Введите имя от 2 до 250 символов.', field='name', form_token=data.get('token'))
+        normalized = normalize_phone(phone)
+        if not normalized:
+            return error('Укажите российский номер телефона, например +7 (999) 123-45-67.', field='phone', form_token=data.get('token'))
+        phone = normalized
+        comment = comment.replace('\r\n', '\n')
+        if len(comment) > 500:
+            return error('Сократите комментарий до 500 символов.', field='comment', form_token=data.get('token'))
+        if door and door not in DOORS:
+            return error('Выберите тип ворот из списка.', field='door', form_token=data.get('token'))
+        if data.get('consent') is not True:
+            return error('Подтвердите согласие на обработку персональных данных.', field='consent', form_token=data.get('token'))
+        try:
+            stamp, digest = data['token'].rsplit('.', 1)
+            age = time.time() - float(stamp)
+            if not hmac.compare_digest(signature(stamp), digest) or not 0 <= age <= 7200:
+                raise ValueError
+        except (KeyError, ValueError, TypeError, AttributeError):
+            return error('Срок действия формы истёк. Подождите несколько секунд и отправьте заявку ещё раз.', retry_token=new_token())
+        if age < 3:
+            return error('Подождите несколько секунд и отправьте заявку ещё раз.', retry_token=data['token'])
         now = time.time()
         # Only enable this behind a proxy that overwrites X-Forwarded-For.
         ip = request.headers.get('x-forwarded-for', '').split(',')[0].strip() if os.getenv('TRUST_PROXY') == '1' else ''
@@ -96,10 +171,12 @@ def create_app(db_path=None):
                     del attempts[key]
             recent = attempts.setdefault(ip, [])
             if len(recent) >= 3:
-                return error('Слишком много заявок. Попробуйте через 10 минут', 429)
-            recent.append(now)
+                return error('Слишком много заявок. Попробуйте через 10 минут.', 429, form_token=data['token'])
             if db.execute('SELECT 1 FROM leads WHERE phone=? AND created>?', (phone, now - 600)).fetchone():
-                return error('Заявка с этим номером уже принята. Мы скоро позвоним', 409)
+                if native:
+                    return RedirectResponse('/?lead=duplicate#lead', status_code=303)
+                return error(DUPLICATE, 409)
+            recent.append(now)
             source = '/'
             cursor = db.execute('INSERT INTO leads(name,phone,door,comment,source,created,status) VALUES(?,?,?,?,?,?,?)', (name, phone, door, comment, source, now, 'pending'))
             lead_id = cursor.lastrowid
@@ -118,11 +195,11 @@ def create_app(db_path=None):
             pass
         with sqlite3.connect(database) as db:
             db.execute('UPDATE leads SET status=? WHERE id=?', (status, lead_id))
-        return {'ok': True}
+        return accepted()
 
     @app.get('/')
-    def index():
-        return FileResponse(ROOT / 'static/index.html')
+    def index(lead: str = ''):
+        return render_form(message={'accepted': ACCEPTED, 'duplicate': DUPLICATE}.get(lead, ''))
 
     @app.get('/privacy')
     def privacy():

@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import re
 import runpy
 import sqlite3
 import time
@@ -86,6 +87,127 @@ def test_optional_empty(site, telegram):
     assert site[0].post('/api/lead', json=data).status_code == 200
 
 
+@pytest.mark.parametrize('phone,normalized', [
+    ('+7 (999) 123-45-67', '+79991234567'),
+    ('8 999 123 45 67', '+79991234567'),
+    ('89991234567', '+79991234567'),
+    ('79991234567', '+79991234567'),
+    ('9991234567', '+79991234567'),
+    ('8123456789', '+78123456789'),
+    ('+7-999-123-45-67', '+79991234567'),
+    (' 8(495) 123.45.67 ', '+74951234567'),
+    ('+7\u00a0(999)\u202f123\u00a045\u00a067', '+79991234567'),
+    ('Телефон: +7 (999) 123-45-67', '+79991234567'),
+])
+def test_russian_phone_formats(site, telegram, phone, normalized):
+    data = payload()
+    data['phone'] = phone
+    assert site[0].post('/api/lead', json=data).status_code == 200
+    with sqlite3.connect(site[1]) as db:
+        assert db.execute('SELECT phone FROM leads').fetchone() == (normalized,)
+
+
+@pytest.mark.parametrize('phone', ['+8 999 123 45 67', '+9991234567', '8 999 123 45 67 доб. 2',
+                                  '8 999 123 45 67 / 8 495 123 45 67', '79991234+567'])
+def test_phone_errors_do_not_silently_change_a_number(site, telegram, phone):
+    response = site[0].post('/api/lead', json={**payload(), 'phone': phone})
+    assert response.status_code == 400
+    assert response.json()['field'] == 'phone'
+    telegram.assert_not_called()
+
+
+@pytest.mark.parametrize('name', ['  Алёна д’Арк-Смирнова 😀  ', "Zoë O'Neill", 'Ё' * 249 + '😀'])
+def test_unusual_names_are_kept(site, telegram, name):
+    assert site[0].post('/api/lead', json={**payload(), 'name': name}).status_code == 200
+    with sqlite3.connect(site[1]) as db:
+        assert db.execute('SELECT name FROM leads').fetchone() == (name.strip(),)
+
+
+@pytest.mark.parametrize('changes,field,message', [
+    ({'name': '', 'phone': '', 'consent': False}, 'name', 'Укажите ваше имя.'),
+    ({'name': ' \u00a0 '}, 'name', 'Укажите ваше имя.'),
+    ({'name': 'ё' * 251}, 'name', 'Введите имя от 2 до 250 символов.'),
+    ({'phone': ''}, 'phone', 'Укажите российский номер телефона'),
+    ({'consent': False}, 'consent', 'Подтвердите согласие'),
+])
+def test_field_specific_errors(site, telegram, changes, field, message):
+    response = site[0].post('/api/lead', json={**payload(), **changes})
+    assert response.status_code == 400
+    assert response.json()['field'] == field
+    assert response.json()['detail'].startswith(message)
+    telegram.assert_not_called()
+
+
+def test_fresh_and_expired_tokens_can_be_retried_without_reloading(site, telegram):
+    client = site[0]
+    issued = client.get('/api/form-token').json()['token']
+    early = client.post('/api/lead', json={**payload(), 'token': issued})
+    assert early.status_code == 400
+    assert early.json()['retry_token'] == issued
+    expired = client.post('/api/lead', json={**payload(), 'token': token(7201)})
+    assert expired.status_code == 400
+    refreshed = expired.json()['retry_token']
+    assert refreshed != issued
+    stamp = float(refreshed.rsplit('.', 1)[0])
+    with patch('app.time.time', return_value=stamp + 4):
+        assert client.post('/api/lead', json={**payload(), 'token': refreshed}).json() == {'ok': True}
+    telegram.assert_called_once()
+
+
+def test_native_form_preserves_fields_and_redirects_after_success(site, telegram):
+    client = site[0]
+    page = client.get('/')
+    assert 'method="post" action="/api/lead#lead"' in page.text
+    form_token = re.search(r'name="token" value="([^"]+)"', page.text)[1]
+    data = {**payload(), 'phone': 'неполный номер', 'consent': 'on', 'token': form_token}
+    invalid = client.post('/api/lead', data=data)
+    assert invalid.status_code == 400
+    assert 'value="Анна &lt;b&gt;"' in invalid.text
+    assert 'value="неполный номер"' in invalid.text
+    assert '&lt;script&gt;&amp;</textarea>' in invalid.text
+    assert '<option selected>Секционные' in invalid.text
+    assert 'name="consent" required checked' in invalid.text
+    assert 'aria-invalid="true" aria-describedby="form-status" autofocus' in invalid.text
+    assert form_token in invalid.text
+    telegram.assert_not_called()
+
+    data['phone'] = '9991234567'
+    stamp = float(form_token.rsplit('.', 1)[0])
+    with patch('app.time.time', return_value=stamp + 4):
+        success = client.post('/api/lead', data=data, follow_redirects=False)
+        assert success.status_code == 303
+        assert success.headers['location'] == '/?lead=accepted#lead'
+        assert 'Заявка принята.' in client.get(success.headers['location']).text
+        duplicate = client.post('/api/lead', data=data, follow_redirects=False)
+        assert duplicate.status_code == 303
+        assert duplicate.headers['location'] == '/?lead=duplicate#lead'
+        assert 'заявка с этим номером уже принята' in client.get(duplicate.headers['location']).text.lower()
+    telegram.assert_called_once()
+
+
+def test_native_encoding_of_maximum_length_unicode_fields(site, telegram):
+    data = {**payload(), 'name': '😀' * 250, 'comment': '😀' * 500, 'consent': 'on'}
+    assert site[0].post('/api/lead', data=data, follow_redirects=False).status_code == 303
+    telegram.assert_called_once()
+
+
+def test_native_comment_counts_crlf_as_one_character(site, telegram):
+    client, db_path = site
+    comment = 'а' * 249 + '\r\n' + 'б' * 250
+    data = {**payload(), 'comment': comment, 'consent': 'on'}
+
+    too_long = client.post('/api/lead', data={**data, 'comment': comment + '!'})
+    assert too_long.status_code == 400
+    assert 'Сократите комментарий до 500 символов.' in too_long.text
+
+    success = client.post('/api/lead', data=data, follow_redirects=False)
+    assert success.status_code == 303
+    assert success.headers['location'] == '/?lead=accepted#lead'
+    with sqlite3.connect(db_path) as db:
+        assert db.execute('SELECT comment FROM leads').fetchall() == [(comment.replace('\r\n', '\n'),)]
+    telegram.assert_called_once()
+
+
 def test_rate_limit(site, telegram):
     for i in range(4):
         data = payload()
@@ -99,6 +221,40 @@ def test_dedupe(site, telegram):
     data['phone'] = '89991234567'
     assert site[0].post('/api/lead', json=data).status_code == 409
     assert telegram.call_count == 1
+    for _ in range(3):
+        assert site[0].post('/api/lead', json=data).status_code == 409
+    for phone in ('9991234568', '9991234569'):
+        assert site[0].post('/api/lead', json={**data, 'phone': phone}).status_code == 200
+    assert site[0].post('/api/lead', json=data).status_code == 429
+    assert telegram.call_count == 3
+
+
+@pytest.mark.parametrize('native', [False, True])
+def test_quota_does_not_disclose_recent_leads(site, telegram, monkeypatch, native):
+    monkeypatch.setenv('TRUST_PROXY', '1')
+    client, _ = site
+    other_ip = {'X-Forwarded-For': '192.0.2.20'}
+    visitor_ip = {'X-Forwarded-For': '192.0.2.10'}
+    recent_phone = '9991234560'
+    unused_phone = '9991234564'
+    assert client.post('/api/lead', json={**payload(), 'phone': recent_phone}, headers=other_ip).status_code == 200
+    for i in (1, 2, 3):
+        assert client.post('/api/lead', json={**payload(), 'phone': f'999123456{i}'}, headers=visitor_ip).status_code == 200
+    probe = payload()
+
+    def try_phone(phone):
+        data = {**probe, 'phone': phone}
+        fields = {'data': {**data, 'consent': 'on'}} if native else {'json': data}
+        return client.post('/api/lead', **fields, headers=visitor_ip, follow_redirects=False)
+
+    recent, unused = try_phone(recent_phone), try_phone(unused_phone)
+    assert recent.status_code == unused.status_code == 429
+    assert recent.headers.get('location') == unused.headers.get('location') is None
+    if native:
+        assert recent.text.replace(recent_phone, unused_phone) == unused.text
+    else:
+        assert recent.json() == unused.json()
+    assert telegram.call_count == 4
 
 
 @pytest.mark.parametrize('failure', ['network', 'api'])
@@ -120,3 +276,23 @@ def test_size_and_headers(site):
     assert 'unsafe-inline' not in response.headers['content-security-policy']
     assert site[0].post('/api/lead', content='[').status_code == 400
     assert site[0].post('/api/lead', json=[]).status_code == 400
+
+
+def test_oversized_native_post_returns_a_retryable_form(site, telegram):
+    client, _ = site
+    oversized = client.post('/api/lead', data={**payload(), 'comment': '😀' * 1500, 'consent': 'on'})
+    assert oversized.status_code == 413
+    assert oversized.headers['content-type'].startswith('text/html')
+    assert oversized.headers['cache-control'] == 'no-store'
+    assert oversized.headers['x-frame-options'] == 'DENY'
+    assert 'Заявка слишком большая.' in oversized.text
+    assert 'method="post" action="/api/lead#lead"' in oversized.text
+    form_token = re.search(r'name="token" value="([^"]+)"', oversized.text)[1]
+    telegram.assert_not_called()
+
+    stamp = float(form_token.rsplit('.', 1)[0])
+    with patch('app.time.time', return_value=stamp + 4):
+        retry = client.post('/api/lead', data={**payload(), 'consent': 'on', 'token': form_token}, follow_redirects=False)
+    assert retry.status_code == 303
+    assert retry.headers['location'] == '/?lead=accepted#lead'
+    telegram.assert_called_once()
