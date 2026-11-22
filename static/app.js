@@ -11,7 +11,7 @@ async function refreshToken() {
   } catch { statusLine.textContent = 'Не удалось загрузить форму. Обновите страницу.'; }
 }
 refreshToken();
-form.phone.addEventListener('input', () => {
+form.phone.addEventListener('input', event => {
   let digits = form.phone.value.replace(/\D/g, '');
   if (/^[78]/.test(digits)) digits = digits.slice(1);
   digits = digits.slice(0, 10);
@@ -21,7 +21,7 @@ form.phone.addEventListener('input', () => {
   if (digits.length > 3) value += digits.slice(3, 6);
   if (digits.length > 6) value += '-' + digits.slice(6, 8);
   if (digits.length > 8) value += '-' + digits.slice(8, 10);
-  form.phone.value = value;
+  form.phone.value = event.inputType === 'deleteContentBackward' ? value.replace(/\D+$/, '') : value;
 });
 document.querySelectorAll('[data-door]').forEach(link => link.addEventListener('click', () => { form.door.value = link.dataset.door; }));
 form.addEventListener('submit', async event => {
