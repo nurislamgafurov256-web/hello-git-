@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import runpy
 import sqlite3
 import time
 from unittest.mock import AsyncMock, patch
@@ -8,6 +9,13 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 from app import create_app
+
+
+def test_entrypoint_disables_proxy_rewriting(tmp_path, monkeypatch):
+    monkeypatch.setenv('LEADS_DB', str(tmp_path / 'entrypoint.sqlite3'))
+    with patch('uvicorn.run') as run:
+        runpy.run_module('app', run_name='__main__')
+    assert run.call_args.kwargs['proxy_headers'] is False
 
 
 @pytest.fixture
