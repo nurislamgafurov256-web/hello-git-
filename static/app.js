@@ -2,6 +2,45 @@ const form = document.querySelector('#lead-form');
 const statusLine = document.querySelector('#form-status');
 const button = form.querySelector('button');
 const token = form.elements.token;
+const { name, phone, door, comment, consent } = form.elements;
+const fields = [name, phone, door, comment, consent];
+const descriptions = new Map(fields.map(field => [field, (field.getAttribute('aria-describedby') || '')
+  .split(' ').filter(id => id && id !== `${field.id}-error`)]));
+let submitting = false;
+
+function showFieldError(field, message) {
+  const error = document.getElementById(`${field.id}-error`);
+  const ids = descriptions.get(field);
+  error.textContent = message;
+  error.hidden = !message;
+  if (message) {
+    field.setAttribute('aria-invalid', 'true');
+    field.setAttribute('aria-describedby', [error.id, ...ids].join(' '));
+  } else {
+    field.removeAttribute('aria-invalid');
+    if (ids.length) field.setAttribute('aria-describedby', ids.join(' '));
+    else field.removeAttribute('aria-describedby');
+  }
+}
+
+function focusError(field, message) {
+  showFieldError(field, message);
+  if (document.activeElement === field) statusLine.textContent = message;
+  else field.focus();
+}
+
+function invalidField() {
+  const nameLength = Array.from(name.value.trim()).length;
+  if (nameLength < 2 || nameLength > 250) return [name, 'Введите имя от 2 до 250 символов.'];
+  const number = phone.value.trim().replace(/^(?:тел\.?|телефон|tel|phone)\s*:\s*/i, '');
+  const digits = number.replace(/\D/g, '');
+  const complete = number.startsWith('+') ? /^7\d{10}$/.test(digits) : /^(?:\d{10}|[78]\d{10})$/.test(digits);
+  if (!/^\+?[0-9().\s-]+$/.test(number) || !complete) {
+    return [phone, 'Укажите российский номер телефона, например +7 (999) 123-45-67.'];
+  }
+  if (!consent.checked) return [consent, 'Подтвердите согласие на обработку персональных данных.'];
+  return null;
+}
 
 async function sendLead(data) {
   const response = await fetch(form.action, {
@@ -11,55 +50,30 @@ async function sendLead(data) {
   return {status: response.status, result};
 }
 
-const mobileCta = document.querySelector('.mobile-cta');
-const ctaObstacles = new Set();
-if (mobileCta && 'IntersectionObserver' in window) {
-  const ctaObserver = new IntersectionObserver(entries => {
-    entries.forEach(entry => {
-      if (entry.isIntersecting) ctaObstacles.add(entry.target);
-      else ctaObstacles.delete(entry.target);
-    });
-    const hidden = ctaObstacles.size > 0;
-    mobileCta.classList.toggle('is-hidden', hidden);
-    mobileCta.inert = hidden;
-    mobileCta.setAttribute('aria-hidden', String(hidden));
-  }, {rootMargin: '0px 0px 80px 0px'});
-  ctaObserver.observe(document.querySelector('#lead'));
-  ctaObserver.observe(document.querySelector('footer'));
-}
-
-form.noValidate = true;
-function validateField(field) {
-  let message = '';
-  if (field === form.elements.namedItem('name') && field.value.trim().length < 2) message = 'Введите имя (не менее двух символов)';
-  if (field === form.phone) {
-    const value = field.value.trim().replace(/^(?:тел\.?|телефон|tel|phone)\s*:\s*/i, '');
-    const digits = value.replace(/\D/g, '');
-    const complete = value.startsWith('+') ? /^7\d{10}$/.test(digits) : /^(?:\d{10}|[78]\d{10})$/.test(digits);
-    if (!/^\+?[0-9().\s-]+$/.test(value) || !complete) message = 'Введите номер полностью: +7 (XXX) XXX-XX-XX';
-  }
-  if (field === form.consent && !field.checked) message = 'Подтвердите согласие на обработку персональных данных';
-  field.setCustomValidity(message);
-}
-[form.elements.namedItem('name'), form.phone, form.consent].forEach(field => {
-  field.addEventListener('input', () => field.setCustomValidity(''));
-  field.addEventListener('change', () => field.setCustomValidity(''));
-});
-
-document.querySelectorAll('[data-door]').forEach(link => link.addEventListener('click', () => { form.door.value = link.dataset.door; }));
+fields.forEach(field => field.addEventListener('input', () => {
+  if (!field.hasAttribute('aria-invalid')) return;
+  showFieldError(field, '');
+  statusLine.textContent = '';
+}));
+document.querySelectorAll('[data-door]').forEach(link => link.addEventListener('click', () => {
+  door.value = link.dataset.door;
+  showFieldError(door, '');
+}));
 form.addEventListener('submit', async event => {
   event.preventDefault();
-  if (button.disabled) return;
-  [form.elements.namedItem('name'), form.phone, form.consent].forEach(validateField);
-  if (!form.reportValidity()) return;
-  button.disabled = true;
-  form.querySelectorAll('[aria-invalid]').forEach(field => {
-    field.removeAttribute('aria-invalid');
-    field.removeAttribute('aria-describedby');
-  });
+  if (submitting) return;
+  statusLine.textContent = '';
+  fields.forEach(field => showFieldError(field, ''));
+  const invalid = invalidField();
+  if (invalid) {
+    focusError(...invalid);
+    return;
+  }
+  submitting = true;
+  button.setAttribute('aria-disabled', 'true');
   statusLine.textContent = 'Отправляем заявку…';
   const data = Object.fromEntries(new FormData(form));
-  data.consent = form.consent.checked;
+  data.consent = consent.checked;
   try {
     let {status, result} = await sendLead(data);
     if (result.retry_token) {
@@ -72,14 +86,15 @@ form.addEventListener('submit', async event => {
       form.reset();
       return;
     }
-    statusLine.textContent = result.detail || 'Не удалось подтвердить отправку. Попробуйте ещё раз.';
-    if (result.field) {
-      const field = form.elements.namedItem(result.field);
-      field.setAttribute('aria-invalid', 'true');
-      field.setAttribute('aria-describedby', 'form-status');
-      field.focus();
-    }
+    const field = result.field && form.elements.namedItem(result.field);
+    if (fields.includes(field) && result.detail) {
+      statusLine.textContent = '';
+      focusError(field, result.detail);
+    } else statusLine.textContent = result.detail || 'Не удалось подтвердить отправку. Попробуйте ещё раз.';
   } catch {
     statusLine.textContent = 'Нет связи с сайтом. Проверьте интернет и попробуйте ещё раз.';
-  } finally { button.disabled = false; }
+  } finally {
+    submitting = false;
+    button.removeAttribute('aria-disabled');
+  }
 });

@@ -167,7 +167,8 @@ def test_fresh_and_expired_tokens_can_be_retried_without_reloading(site, telegra
 def test_native_form_preserves_fields_and_redirects_after_success(site, telegram):
     client = site[0]
     page = client.get('/')
-    assert 'method="post" action="/api/lead#lead"' in page.text
+    assert 'method="post" action="/api/lead"' in page.text
+    assert ' autofocus' not in page.text
     form_token = re.search(r'name="token" value="([^"]+)"', page.text)[1]
     data = {**payload(), 'phone': 'неполный номер', 'consent': 'on', 'token': form_token}
     invalid = client.post('/api/lead', data=data)
@@ -177,7 +178,8 @@ def test_native_form_preserves_fields_and_redirects_after_success(site, telegram
     assert '&lt;script&gt;&amp;</textarea>' in invalid.text
     assert '<option selected>Секционные' in invalid.text
     assert 'name="consent" required checked' in invalid.text
-    assert 'aria-invalid="true" aria-describedby="form-status" autofocus' in invalid.text
+    assert 'aria-invalid="true" aria-describedby="lead-phone-error lead-phone-hint" autofocus' in invalid.text
+    assert 'id="lead-phone-error" >Укажите российский номер телефона' in invalid.text
     assert form_token in invalid.text
     telegram.assert_not_called()
 
@@ -186,7 +188,7 @@ def test_native_form_preserves_fields_and_redirects_after_success(site, telegram
     with patch('app.time.time', return_value=stamp + 4):
         success = client.post('/api/lead', data=data, follow_redirects=False)
         assert success.status_code == 303
-        assert success.headers['location'] == '/?lead=accepted#lead'
+        assert success.headers['location'] == '/?lead=accepted#form-status'
         assert 'Заявка принята.' in client.get(success.headers['location']).text
         duplicate = client.post('/api/lead', data=data, follow_redirects=False)
         assert duplicate.status_code == 303
@@ -212,7 +214,7 @@ def test_native_comment_counts_crlf_as_one_character(site, telegram):
 
     success = client.post('/api/lead', data=data, follow_redirects=False)
     assert success.status_code == 303
-    assert success.headers['location'] == '/?lead=accepted#lead'
+    assert success.headers['location'] == '/?lead=accepted#form-status'
     with sqlite3.connect(db_path) as db:
         assert db.execute('SELECT comment FROM leads').fetchall() == [(comment.replace('\r\n', '\n'),)]
     telegram.assert_called_once()
@@ -331,7 +333,8 @@ def test_oversized_native_post_returns_a_retryable_form(site, telegram):
     assert oversized.headers['cache-control'] == 'no-store'
     assert oversized.headers['x-frame-options'] == 'DENY'
     assert 'Заявка слишком большая.' in oversized.text
-    assert 'method="post" action="/api/lead#lead"' in oversized.text
+    assert 'method="post" action="/api/lead"' in oversized.text
+    assert '<p id="form-status" role="status" tabindex="-1" autofocus>' in oversized.text
     form_token = re.search(r'name="token" value="([^"]+)"', oversized.text)[1]
     telegram.assert_not_called()
 
@@ -339,7 +342,7 @@ def test_oversized_native_post_returns_a_retryable_form(site, telegram):
     with patch('app.time.time', return_value=stamp + 4):
         retry = client.post('/api/lead', data={**payload(), 'consent': 'on', 'token': form_token}, follow_redirects=False)
     assert retry.status_code == 303
-    assert retry.headers['location'] == '/?lead=accepted#lead'
+    assert retry.headers['location'] == '/?lead=accepted#form-status'
     telegram.assert_called_once()
 
 
@@ -352,7 +355,7 @@ def test_control_characters_rejected(site, telegram, field, value):
 
 
 def test_native_form_uses_post(site):
-    assert '<form id="lead-form" method="post" action="/api/lead#lead"' in site[0].get('/').text
+    assert '<form id="lead-form" method="post" action="/api/lead"' in site[0].get('/').text
 
 
 def test_lead_requires_json_content_type(site):
@@ -365,3 +368,33 @@ def test_json_parser_recursion_error_is_bad_request(site):
         parser.loads.side_effect = RecursionError
         response = site[0].post('/api/lead', content='{}', headers={'Content-Type': 'application/json'})
     assert response.status_code == 400
+
+
+@pytest.mark.parametrize('path', ['/privacy', '/static/style.css', '/static/app.js'])
+def test_page_assets_negotiate_compression(site, path):
+    client = site[0]
+    plain = client.get(path, headers={'Accept-Encoding': 'identity'})
+    compressed = client.get(path, headers={'Accept-Encoding': 'gzip'})
+    assert plain.status_code == compressed.status_code == 200
+    assert 'content-encoding' not in plain.headers
+    assert compressed.headers['content-encoding'] == 'gzip'
+    assert compressed.headers['vary'] == 'Accept-Encoding'
+    assert int(compressed.headers['content-length']) < int(plain.headers['content-length'])
+    assert compressed.content == plain.content
+
+
+def test_index_compresses_without_changing_cache_or_security_headers(site):
+    response = site[0].get('/', headers={'Accept-Encoding': 'gzip'})
+    assert response.status_code == 200
+    assert response.headers['content-encoding'] == 'gzip'
+    assert response.headers['vary'] == 'Accept-Encoding'
+    assert response.headers['cache-control'] == 'no-store'
+    assert 'unsafe-inline' not in response.headers['content-security-policy']
+    assert 'name="token" value="' in response.text
+
+
+def test_form_token_is_uncompressed_and_not_cached(site):
+    response = site[0].get('/api/form-token', headers={'Accept-Encoding': 'gzip'})
+    assert response.status_code == 200
+    assert response.headers['cache-control'] == 'no-store'
+    assert 'content-encoding' not in response.headers
