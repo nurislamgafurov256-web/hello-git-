@@ -138,6 +138,7 @@ def create_app(db_path=None):
         if not normalized:
             return error('Укажите российский номер телефона, например +7 (999) 123-45-67.', field='phone', form_token=data.get('token'))
         phone = normalized
+        comment = comment.replace('\r\n', '\n')
         if len(comment) > 500:
             return error('Сократите комментарий до 500 символов.', field='comment', form_token=data.get('token'))
         if door and door not in DOORS:

@@ -191,6 +191,23 @@ def test_native_encoding_of_maximum_length_unicode_fields(site, telegram):
     telegram.assert_called_once()
 
 
+def test_native_comment_counts_crlf_as_one_character(site, telegram):
+    client, db_path = site
+    comment = 'а' * 249 + '\r\n' + 'б' * 250
+    data = {**payload(), 'comment': comment, 'consent': 'on'}
+
+    too_long = client.post('/api/lead', data={**data, 'comment': comment + '!'})
+    assert too_long.status_code == 400
+    assert 'Сократите комментарий до 500 символов.' in too_long.text
+
+    success = client.post('/api/lead', data=data, follow_redirects=False)
+    assert success.status_code == 303
+    assert success.headers['location'] == '/?lead=accepted#lead'
+    with sqlite3.connect(db_path) as db:
+        assert db.execute('SELECT comment FROM leads').fetchall() == [(comment.replace('\r\n', '\n'),)]
+    telegram.assert_called_once()
+
+
 def test_rate_limit(site, telegram):
     for i in range(4):
         data = payload()
