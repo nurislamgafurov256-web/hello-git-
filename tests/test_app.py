@@ -208,8 +208,36 @@ def test_dedupe(site, telegram):
         assert site[0].post('/api/lead', json=data).status_code == 409
     for phone in ('9991234568', '9991234569'):
         assert site[0].post('/api/lead', json={**data, 'phone': phone}).status_code == 200
-    assert site[0].post('/api/lead', json=data).status_code == 409
+    assert site[0].post('/api/lead', json=data).status_code == 429
     assert telegram.call_count == 3
+
+
+@pytest.mark.parametrize('native', [False, True])
+def test_quota_does_not_disclose_recent_leads(site, telegram, monkeypatch, native):
+    monkeypatch.setenv('TRUST_PROXY', '1')
+    client, _ = site
+    other_ip = {'X-Forwarded-For': '192.0.2.20'}
+    visitor_ip = {'X-Forwarded-For': '192.0.2.10'}
+    recent_phone = '9991234560'
+    unused_phone = '9991234564'
+    assert client.post('/api/lead', json={**payload(), 'phone': recent_phone}, headers=other_ip).status_code == 200
+    for i in (1, 2, 3):
+        assert client.post('/api/lead', json={**payload(), 'phone': f'999123456{i}'}, headers=visitor_ip).status_code == 200
+    probe = payload()
+
+    def try_phone(phone):
+        data = {**probe, 'phone': phone}
+        fields = {'data': {**data, 'consent': 'on'}} if native else {'json': data}
+        return client.post('/api/lead', **fields, headers=visitor_ip, follow_redirects=False)
+
+    recent, unused = try_phone(recent_phone), try_phone(unused_phone)
+    assert recent.status_code == unused.status_code == 429
+    assert recent.headers.get('location') == unused.headers.get('location') is None
+    if native:
+        assert recent.text.replace(recent_phone, unused_phone) == unused.text
+    else:
+        assert recent.json() == unused.json()
+    assert telegram.call_count == 4
 
 
 @pytest.mark.parametrize('failure', ['network', 'api'])

@@ -162,13 +162,13 @@ def create_app(db_path=None):
                 attempts[key] = [t for t in attempts[key] if now - t < 600]
                 if not attempts[key]:
                     del attempts[key]
+            recent = attempts.setdefault(ip, [])
+            if len(recent) >= 3:
+                return error('Слишком много заявок. Попробуйте через 10 минут.', 429, form_token=data['token'])
             if db.execute('SELECT 1 FROM leads WHERE phone=? AND created>?', (phone, now - 600)).fetchone():
                 if native:
                     return RedirectResponse('/?lead=duplicate#lead', status_code=303)
                 return error(DUPLICATE, 409)
-            recent = attempts.setdefault(ip, [])
-            if len(recent) >= 3:
-                return error('Слишком много заявок. Попробуйте через 10 минут.', 429, form_token=data['token'])
             recent.append(now)
             source = '/'
             cursor = db.execute('INSERT INTO leads(name,phone,door,comment,source,created,status) VALUES(?,?,?,?,?,?,?)', (name, phone, door, comment, source, now, 'pending'))
