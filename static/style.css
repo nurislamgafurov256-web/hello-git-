@@ -21,7 +21,7 @@
   .faq summary{min-height:44px;padding:12px 0}
   .consent{min-height:44px;align-items:flex-start;gap:8px}
   .consent input{flex:0 0 22px;width:22px;height:22px;margin:2px 0}
-  .consent a{display:inline-block;min-height:44px;padding:12px 0}
+  .consent a{padding:12px 0}
   footer a:not(.logo){display:inline-block;min-height:44px;padding:12px 0}
   .micro,.hero-proof small,.floating-card small,.trust>span,.product p,.price-note,.benefits p,.steps p,.section-heading>p,.lead-section>div>p:not(.eyebrow),.lead-note,.consent>span,footer p,.header-contact small{color:#596651}
   .desktop{display:none}
