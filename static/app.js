@@ -13,18 +13,20 @@ async function sendLead(data) {
 
 const mobileCta = document.querySelector('.mobile-cta');
 const ctaObstacles = new Set();
-const ctaObserver = new IntersectionObserver(entries => {
-  entries.forEach(entry => {
-    if (entry.isIntersecting) ctaObstacles.add(entry.target);
-    else ctaObstacles.delete(entry.target);
-  });
-  const hidden = ctaObstacles.size > 0;
-  mobileCta.classList.toggle('is-hidden', hidden);
-  mobileCta.inert = hidden;
-  mobileCta.setAttribute('aria-hidden', String(hidden));
-}, {rootMargin: '0px 0px 80px 0px'});
-ctaObserver.observe(document.querySelector('#lead'));
-ctaObserver.observe(document.querySelector('footer'));
+if (mobileCta && 'IntersectionObserver' in window) {
+  const ctaObserver = new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) ctaObstacles.add(entry.target);
+      else ctaObstacles.delete(entry.target);
+    });
+    const hidden = ctaObstacles.size > 0;
+    mobileCta.classList.toggle('is-hidden', hidden);
+    mobileCta.inert = hidden;
+    mobileCta.setAttribute('aria-hidden', String(hidden));
+  }, {rootMargin: '0px 0px 80px 0px'});
+  ctaObserver.observe(document.querySelector('#lead'));
+  ctaObserver.observe(document.querySelector('footer'));
+}
 
 form.noValidate = true;
 function validateField(field) {
