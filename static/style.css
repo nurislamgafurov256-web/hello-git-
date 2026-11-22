@@ -12,3 +12,35 @@
 .catalog+.price-note{font-size:13px;color:#526257}
 .lead-section>div>p.lead-note{color:#485d43}
 @media(min-width:1500px){.hero-visual{min-height:620px}}@media(max-width:800px){.wrap{padding-left:22px;padding-right:22px}.header{height:85px}.header nav{display:none}.header-contact{font-size:12px}.logo span{font-size:16px}.logo small{font-size:6px}.hero{grid-template-columns:1fr;gap:25px}.hero-copy{padding-top:25px}h1{font-size:56px}.hero-visual{height:430px;margin-bottom:0}.hero-proof{margin-top:25px}.trust{flex-wrap:wrap;gap:15px;margin-top:28px}.trust>span{width:100%}.trust b{width:45%;font-size:11px}.section{padding-top:50px;padding-bottom:35px}.section-heading{display:block}.section-heading>p{margin-top:18px}h2{font-size:29px}.catalog{grid-template-columns:1fr}.product-art{height:220px}.product p{font-size:12px}.benefit-grid{grid-template-columns:1fr 1fr;gap:25px}.benefit-grid>div:first-child{grid-column:1/-1}.benefit:last-child{grid-column:1/-1}.benefits p{font-size:12px}.steps{grid-template-columns:1fr;gap:20px}.steps span{margin-bottom:8px}.steps p{max-width:none}.faq-section{grid-template-columns:1fr;gap:25px;padding-top:20px;padding-bottom:40px}.lead-section{grid-template-columns:1fr;margin-left:12px;margin-right:12px;gap:25px}.lead-section h2{font-size:33px}.lead-note{margin-top:18px}.form-row{grid-template-columns:1fr;gap:0}label{font-size:12px}input:not([type=checkbox]),select,textarea{font-size:16px}.consent{font-size:11px}footer{flex-wrap:wrap;gap:10px;padding-bottom:100px!important}footer .logo{width:100%;margin-top:15px}.mobile-cta{display:flex;position:fixed;bottom:12px;left:16px;right:16px;z-index:5;box-shadow:0 4px 24px #162d3844;justify-content:center}.privacy h1{font-size:34px}}
+
+@media(max-width:800px){
+  .mobile-cta{transition:opacity .18s ease,visibility .18s ease}
+  .mobile-cta.is-hidden{opacity:0;visibility:hidden;pointer-events:none}
+  .lead-section{padding-bottom:55px}
+  .header{height:auto;min-height:100px;gap:8px;flex-wrap:wrap;padding-top:12px;padding-bottom:12px}
+  .header-contact{display:flex;flex-direction:column;justify-content:center;min-height:44px}
+  .logo{min-height:44px}
+  .logo small,footer .logo small{font-size:12px;letter-spacing:.25px}
+  .logo span{font-size:16px}
+  .eyebrow{font-size:11px;letter-spacing:1.4px}
+  .micro,.hero-proof,.hero-proof small,.floating-card small,.trust>span,.trust b,.price-note,.lead-note,.consent,footer p,footer small,.header-contact small{font-size:12px}
+  .visual-top,.product-art>span{font-size:12px;letter-spacing:.4px}
+  .visual-top{left:16px;right:16px;gap:12px}
+  .product-bottom a{display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px}
+  .faq details,.faq details:first-child{padding:0}
+  .faq summary{min-height:44px;padding:12px 0}
+  .consent{min-height:44px;align-items:flex-start;gap:8px}
+  .consent input{flex:0 0 22px;width:22px;height:22px;margin:2px 0}
+  .consent a{padding:12px 0}
+  footer a:not(.logo){display:inline-block;min-height:44px;padding:12px 0}
+  .micro,.hero-proof small,.floating-card small,.trust>span,.product p,.price-note,.benefits p,.steps p,.section-heading>p,.lead-section>div>p:not(.eyebrow),.lead-note,.consent>span,footer p,.header-contact small{color:#596651}
+  .desktop{display:none}
+  .hero-copy{padding-top:12px}
+  .hero h1{font-size:44px;letter-spacing:-1.4px;margin-bottom:18px}
+  .hero .eyebrow{margin-bottom:16px}
+  .intro{margin-top:0;margin-bottom:20px;line-height:1.65}
+  .hero-proof{margin-top:18px}
+}
+@media(max-width:420px){
+  .hero h1{font-size:42px;letter-spacing:-1.2px}
+}
