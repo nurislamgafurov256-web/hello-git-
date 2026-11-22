@@ -11,10 +11,45 @@ async function sendLead(data) {
   return {status: response.status, result};
 }
 
+const mobileCta = document.querySelector('.mobile-cta');
+const ctaObstacles = new Set();
+const ctaObserver = new IntersectionObserver(entries => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) ctaObstacles.add(entry.target);
+    else ctaObstacles.delete(entry.target);
+  });
+  const hidden = ctaObstacles.size > 0;
+  mobileCta.classList.toggle('is-hidden', hidden);
+  mobileCta.inert = hidden;
+  mobileCta.setAttribute('aria-hidden', String(hidden));
+}, {rootMargin: '0px 0px 80px 0px'});
+ctaObserver.observe(document.querySelector('#lead'));
+ctaObserver.observe(document.querySelector('footer'));
+
+form.noValidate = true;
+function validateField(field) {
+  let message = '';
+  if (field === form.elements.namedItem('name') && field.value.trim().length < 2) message = 'Введите имя (не менее двух символов)';
+  if (field === form.phone) {
+    const value = field.value.trim().replace(/^(?:тел\.?|телефон|tel|phone)\s*:\s*/i, '');
+    const digits = value.replace(/\D/g, '');
+    const complete = value.startsWith('+') ? /^7\d{10}$/.test(digits) : /^(?:\d{10}|[78]\d{10})$/.test(digits);
+    if (!/^\+?[0-9().\s-]+$/.test(value) || !complete) message = 'Введите номер полностью: +7 (XXX) XXX-XX-XX';
+  }
+  if (field === form.consent && !field.checked) message = 'Подтвердите согласие на обработку персональных данных';
+  field.setCustomValidity(message);
+}
+[form.elements.namedItem('name'), form.phone, form.consent].forEach(field => {
+  field.addEventListener('input', () => field.setCustomValidity(''));
+  field.addEventListener('change', () => field.setCustomValidity(''));
+});
+
 document.querySelectorAll('[data-door]').forEach(link => link.addEventListener('click', () => { form.door.value = link.dataset.door; }));
 form.addEventListener('submit', async event => {
   event.preventDefault();
   if (button.disabled) return;
+  [form.elements.namedItem('name'), form.phone, form.consent].forEach(validateField);
+  if (!form.reportValidity()) return;
   button.disabled = true;
   form.querySelectorAll('[aria-invalid]').forEach(field => {
     field.removeAttribute('aria-invalid');
