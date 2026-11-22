@@ -177,7 +177,8 @@ def test_native_form_preserves_fields_and_redirects_after_success(site, telegram
     assert '&lt;script&gt;&amp;</textarea>' in invalid.text
     assert '<option selected>Секционные' in invalid.text
     assert 'name="consent" required checked' in invalid.text
-    assert 'aria-invalid="true" aria-describedby="form-status" autofocus' in invalid.text
+    assert 'aria-invalid="true" aria-describedby="lead-phone-error lead-phone-hint" autofocus' in invalid.text
+    assert 'id="lead-phone-error" >Укажите российский номер телефона' in invalid.text
     assert form_token in invalid.text
     telegram.assert_not_called()
 
@@ -365,3 +366,32 @@ def test_json_parser_recursion_error_is_bad_request(site):
         parser.loads.side_effect = RecursionError
         response = site[0].post('/api/lead', content='{}', headers={'Content-Type': 'application/json'})
     assert response.status_code == 400
+
+
+@pytest.mark.parametrize('path', ['/privacy', '/static/style.css', '/static/app.js'])
+def test_page_assets_negotiate_compression(site, path):
+    client = site[0]
+    plain = client.get(path, headers={'Accept-Encoding': 'identity'})
+    compressed = client.get(path, headers={'Accept-Encoding': 'gzip'})
+    assert plain.status_code == compressed.status_code == 200
+    assert 'content-encoding' not in plain.headers
+    assert compressed.headers['content-encoding'] == 'gzip'
+    assert compressed.headers['vary'] == 'Accept-Encoding'
+    assert int(compressed.headers['content-length']) < int(plain.headers['content-length'])
+    assert compressed.content == plain.content
+
+
+def test_index_compresses_without_changing_cache_or_security_headers(site):
+    response = site[0].get('/', headers={'Accept-Encoding': 'gzip'})
+    assert response.status_code == 200
+    assert response.headers['content-encoding'] == 'gzip'
+    assert response.headers['vary'] == 'Accept-Encoding'
+    assert 'unsafe-inline' not in response.headers['content-security-policy']
+    assert 'name="token" value="' in response.text
+
+
+def test_form_token_is_uncompressed_and_not_cached(site):
+    response = site[0].get('/api/form-token', headers={'Accept-Encoding': 'gzip'})
+    assert response.status_code == 200
+    assert response.headers['cache-control'] == 'no-store'
+    assert 'content-encoding' not in response.headers

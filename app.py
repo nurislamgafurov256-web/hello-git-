@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import FastAPI, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -43,6 +44,7 @@ def normalize_phone(value):
 
 def create_app(db_path=None):
     app = FastAPI(debug=False, docs_url=None, redoc_url=None, openapi_url=None)
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
     secret = os.getenv('SECRET_KEY') or secrets.token_hex(32)
     database = str(db_path or os.getenv('LEADS_DB', ROOT / 'leads.sqlite3'))
     lock = threading.Lock()
@@ -61,13 +63,19 @@ def create_app(db_path=None):
     def render_form(values=None, message='', code=200, field='', form_token=None):
         values = values or {}
         fields = {key: html.escape(values.get(key, '')) for key in ('name', 'phone', 'comment')}
-        fields.update({f'{key}_error': 'aria-invalid="true" aria-describedby="form-status" autofocus' if key == field else ''
-                       for key in ('name', 'phone', 'door', 'comment', 'consent')})
+        for key in ('name', 'phone', 'door', 'comment', 'consent'):
+            descriptions = [f'lead-{key}-error'] if key == field else []
+            if key == 'phone':
+                descriptions.append('lead-phone-hint')
+            described_by = f'aria-describedby="{" ".join(descriptions)}"' if descriptions else ''
+            fields[f'{key}_error'] = f'aria-invalid="true" {described_by} autofocus' if key == field else described_by
+            fields[f'{key}_hidden'] = '' if key == field else 'hidden'
+            fields[f'{key}_feedback'] = html.escape(message) if key == field else ''
         fields.update({f'door_{index}': 'selected' if values.get('door') == door else ''
                        for index, door in enumerate(DOORS, 1)})
         page = Template((ROOT / 'index.html').read_text(encoding='utf-8'))
         return HTMLResponse(page.substitute(
-            fields, message=html.escape(message), form_token=html.escape(form_token or new_token()),
+            fields, message=html.escape(message) if not field else '', form_token=html.escape(form_token or new_token()),
             consent='checked' if values.get('consent') is True else '',
         ), status_code=code)
 
