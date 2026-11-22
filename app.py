@@ -171,7 +171,7 @@ def create_app(db_path=None):
 
         def accepted():
             if native:
-                return RedirectResponse('/?lead=accepted#lead', status_code=303)
+                return RedirectResponse('/?lead=accepted#form-status', status_code=303)
             return {'ok': True}
 
         content_type = request.headers.get('content-type', '').split(';', 1)[0].strip().lower()

@@ -188,7 +188,7 @@ def test_native_form_preserves_fields_and_redirects_after_success(site, telegram
     with patch('app.time.time', return_value=stamp + 4):
         success = client.post('/api/lead', data=data, follow_redirects=False)
         assert success.status_code == 303
-        assert success.headers['location'] == '/?lead=accepted#lead'
+        assert success.headers['location'] == '/?lead=accepted#form-status'
         assert 'Заявка принята.' in client.get(success.headers['location']).text
         duplicate = client.post('/api/lead', data=data, follow_redirects=False)
         assert duplicate.status_code == 303
@@ -214,7 +214,7 @@ def test_native_comment_counts_crlf_as_one_character(site, telegram):
 
     success = client.post('/api/lead', data=data, follow_redirects=False)
     assert success.status_code == 303
-    assert success.headers['location'] == '/?lead=accepted#lead'
+    assert success.headers['location'] == '/?lead=accepted#form-status'
     with sqlite3.connect(db_path) as db:
         assert db.execute('SELECT comment FROM leads').fetchall() == [(comment.replace('\r\n', '\n'),)]
     telegram.assert_called_once()
@@ -342,7 +342,7 @@ def test_oversized_native_post_returns_a_retryable_form(site, telegram):
     with patch('app.time.time', return_value=stamp + 4):
         retry = client.post('/api/lead', data={**payload(), 'consent': 'on', 'token': form_token}, follow_redirects=False)
     assert retry.status_code == 303
-    assert retry.headers['location'] == '/?lead=accepted#lead'
+    assert retry.headers['location'] == '/?lead=accepted#form-status'
     telegram.assert_called_once()
 
 
