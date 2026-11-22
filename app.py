@@ -73,14 +73,20 @@ def create_app(db_path=None):
 
     @app.middleware('http')
     async def protect(request, call_next):
-        limit = 12288 if is_form(request) else 8192
+        native = is_form(request)
+        limit = 12288 if native else 8192
         body = b''
         async for chunk in request.stream():
+            if len(body) + len(chunk) > limit:
+                if native and request.method == 'POST' and request.url.path == '/api/lead':
+                    response = render_form(message='Заявка слишком большая. Заполните форму ещё раз и сократите длинные поля.', code=413)
+                else:
+                    response = JSONResponse({'detail': 'Слишком большой запрос'}, status_code=413)
+                break
             body += chunk
-            if len(body) > limit:
-                return JSONResponse({'detail': 'Слишком большой запрос'}, status_code=413)
-        request._body = body
-        response = await call_next(request)
+        else:
+            request._body = body
+            response = await call_next(request)
         response.headers.update({
             'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
             'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff',

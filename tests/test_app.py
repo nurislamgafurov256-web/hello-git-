@@ -276,3 +276,23 @@ def test_size_and_headers(site):
     assert 'unsafe-inline' not in response.headers['content-security-policy']
     assert site[0].post('/api/lead', content='[').status_code == 400
     assert site[0].post('/api/lead', json=[]).status_code == 400
+
+
+def test_oversized_native_post_returns_a_retryable_form(site, telegram):
+    client, _ = site
+    oversized = client.post('/api/lead', data={**payload(), 'comment': '😀' * 1500, 'consent': 'on'})
+    assert oversized.status_code == 413
+    assert oversized.headers['content-type'].startswith('text/html')
+    assert oversized.headers['cache-control'] == 'no-store'
+    assert oversized.headers['x-frame-options'] == 'DENY'
+    assert 'Заявка слишком большая.' in oversized.text
+    assert 'method="post" action="/api/lead#lead"' in oversized.text
+    form_token = re.search(r'name="token" value="([^"]+)"', oversized.text)[1]
+    telegram.assert_not_called()
+
+    stamp = float(form_token.rsplit('.', 1)[0])
+    with patch('app.time.time', return_value=stamp + 4):
+        retry = client.post('/api/lead', data={**payload(), 'consent': 'on', 'token': form_token}, follow_redirects=False)
+    assert retry.status_code == 303
+    assert retry.headers['location'] == '/?lead=accepted#lead'
+    telegram.assert_called_once()
