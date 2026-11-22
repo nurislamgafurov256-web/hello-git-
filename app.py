@@ -76,6 +76,7 @@ def create_app(db_path=None):
         page = Template((ROOT / 'index.html').read_text(encoding='utf-8'))
         return HTMLResponse(page.substitute(
             fields, message=html.escape(message) if not field else '', form_token=html.escape(form_token or new_token()),
+            message_focus=' autofocus' if message and not field and code >= 400 else '',
             consent='checked' if values.get('consent') is True else '',
         ), status_code=code)
 

@@ -167,7 +167,8 @@ def test_fresh_and_expired_tokens_can_be_retried_without_reloading(site, telegra
 def test_native_form_preserves_fields_and_redirects_after_success(site, telegram):
     client = site[0]
     page = client.get('/')
-    assert 'method="post" action="/api/lead#lead"' in page.text
+    assert 'method="post" action="/api/lead"' in page.text
+    assert ' autofocus' not in page.text
     form_token = re.search(r'name="token" value="([^"]+)"', page.text)[1]
     data = {**payload(), 'phone': 'неполный номер', 'consent': 'on', 'token': form_token}
     invalid = client.post('/api/lead', data=data)
@@ -332,7 +333,8 @@ def test_oversized_native_post_returns_a_retryable_form(site, telegram):
     assert oversized.headers['cache-control'] == 'no-store'
     assert oversized.headers['x-frame-options'] == 'DENY'
     assert 'Заявка слишком большая.' in oversized.text
-    assert 'method="post" action="/api/lead#lead"' in oversized.text
+    assert 'method="post" action="/api/lead"' in oversized.text
+    assert '<p id="form-status" role="status" tabindex="-1" autofocus>' in oversized.text
     form_token = re.search(r'name="token" value="([^"]+)"', oversized.text)[1]
     telegram.assert_not_called()
 
@@ -353,7 +355,7 @@ def test_control_characters_rejected(site, telegram, field, value):
 
 
 def test_native_form_uses_post(site):
-    assert '<form id="lead-form" method="post" action="/api/lead#lead"' in site[0].get('/').text
+    assert '<form id="lead-form" method="post" action="/api/lead"' in site[0].get('/').text
 
 
 def test_lead_requires_json_content_type(site):
