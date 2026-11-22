@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import html
+import ipaddress
 import json
 import os
 import re
@@ -8,6 +9,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from string import Template
@@ -45,6 +47,7 @@ def create_app(db_path=None):
     database = str(db_path or os.getenv('LEADS_DB', ROOT / 'leads.sqlite3'))
     lock = threading.Lock()
     attempts = {}
+    token_attempts = {}
     with sqlite3.connect(database) as db:
         db.execute('CREATE TABLE IF NOT EXISTS leads (id INTEGER PRIMARY KEY, name TEXT, phone TEXT, door TEXT, comment TEXT, source TEXT, created REAL, status TEXT)')
 
@@ -71,6 +74,42 @@ def create_app(db_path=None):
     def is_form(request):
         return request.headers.get('content-type', '').split(';', 1)[0].strip().lower() == FORM_CONTENT_TYPE
 
+    def client_ip(request):
+        direct = request.client.host if request.client else 'unknown'
+        if os.getenv('TRUST_PROXY') != '1':
+            return direct
+        try:
+            peer = ipaddress.ip_address(direct)
+            configured = os.getenv('TRUSTED_PROXY_IPS', '127.0.0.1/32,::1/128').split(',')
+            networks = [ipaddress.ip_network(network.strip()) for network in configured if network.strip()]
+        except ValueError:
+            return direct
+        if not any(peer in network for network in networks):
+            return direct
+
+        addresses = []
+        for header in request.headers.getlist('x-forwarded-for'):
+            for value in header.split(','):
+                try:
+                    address = ipaddress.ip_address(value.strip())
+                except ValueError:
+                    continue
+                if getattr(address, 'scope_id', None) is None:
+                    addresses.append(getattr(address, 'ipv4_mapped', None) or address)
+        if addresses and addresses[-1].is_global:
+            return str(addresses[-1])
+        return next((str(address) for address in addresses if address.is_global), direct)
+
+    def recent_attempts(buckets, ip, now):
+        for key in list(buckets):
+            buckets[key] = [stamp for stamp in buckets[key] if now - stamp < 600]
+            if not buckets[key]:
+                del buckets[key]
+        return buckets.setdefault(ip, [])
+
+    def has_disallowed_controls(value, allowed=''):
+        return any(unicodedata.category(char) in ('Cc', 'Cs', 'Zl', 'Zp') and char not in allowed for char in value)
+
     @app.middleware('http')
     async def protect(request, call_next):
         native = is_form(request)
@@ -91,12 +130,19 @@ def create_app(db_path=None):
             'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
             'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff',
             'Referrer-Policy': 'strict-origin-when-cross-origin',
+            'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+            'Strict-Transport-Security': 'max-age=31536000',
             'Cache-Control': 'no-store' if request.url.path.startswith('/api/') else 'no-cache',
         })
         return response
 
     @app.get('/api/form-token')
-    def token():
+    def token(request: Request):
+        with lock:
+            recent = recent_attempts(token_attempts, client_ip(request), time.time())
+            if len(recent) >= 30:
+                return JSONResponse({'detail': 'Слишком много запросов. Попробуйте через 10 минут'}, status_code=429)
+            recent.append(time.time())
         return {'token': new_token()}
 
     @app.post('/api/lead')
@@ -119,14 +165,19 @@ def create_app(db_path=None):
                 return RedirectResponse('/?lead=accepted#lead', status_code=303)
             return {'ok': True}
 
+        content_type = request.headers.get('content-type', '').split(';', 1)[0].strip().lower()
+        if not content_type:
+            return error('Некорректный запрос')
+        if not native and content_type != 'application/json':
+            return error('Ожидается запрос в формате JSON', 415)
         try:
             if native:
                 values = parse_qs((await request.body()).decode(), keep_blank_values=True)
                 data = {key: value[-1] for key, value in values.items()}
                 data['consent'] = data.get('consent') == 'on'
             else:
-                data = await request.json()
-        except (ValueError, UnicodeDecodeError):
+                data = json.loads((await request.body()).decode('utf-8'))
+        except (ValueError, RecursionError):
             return error('Некорректный запрос')
         if not isinstance(data, dict):
             return error('Некорректный запрос')
@@ -134,6 +185,10 @@ def create_app(db_path=None):
             return accepted()
         name, phone, comment, door = (data.get(key, '') for key in ('name', 'phone', 'comment', 'door'))
         if not all(isinstance(v, str) for v in (name, phone, comment, door)):
+            return error('Проверьте поля формы')
+        if native:
+            comment = comment.replace('\r\n', '\n')
+        if any(has_disallowed_controls(value) for value in (name, phone, door)) or has_disallowed_controls(comment, '\t\n'):
             return error('Проверьте поля формы')
         name = name.strip()
         if not name:
@@ -144,7 +199,6 @@ def create_app(db_path=None):
         if not normalized:
             return error('Укажите российский номер телефона, например +7 (999) 123-45-67.', field='phone', form_token=data.get('token'))
         phone = normalized
-        comment = comment.replace('\r\n', '\n')
         if len(comment) > 500:
             return error('Сократите комментарий до 500 символов.', field='comment', form_token=data.get('token'))
         if door and door not in DOORS:
@@ -161,15 +215,9 @@ def create_app(db_path=None):
         if age < 3:
             return error('Подождите несколько секунд и отправьте заявку ещё раз.', retry_token=data['token'])
         now = time.time()
-        # Only enable this behind a proxy that overwrites X-Forwarded-For.
-        ip = request.headers.get('x-forwarded-for', '').split(',')[0].strip() if os.getenv('TRUST_PROXY') == '1' else ''
-        ip = ip or (request.client.host if request.client else 'unknown')
+        ip = client_ip(request)
         with lock, sqlite3.connect(database) as db:
-            for key in list(attempts):
-                attempts[key] = [t for t in attempts[key] if now - t < 600]
-                if not attempts[key]:
-                    del attempts[key]
-            recent = attempts.setdefault(ip, [])
+            recent = recent_attempts(attempts, ip, now)
             if len(recent) >= 3:
                 return error('Слишком много заявок. Попробуйте через 10 минут.', 429, form_token=data['token'])
             if db.execute('SELECT 1 FROM leads WHERE phone=? AND created>?', (phone, now - 600)).fetchone():

@@ -27,6 +27,16 @@ def site(tmp_path, monkeypatch):
         yield client, path
 
 
+@pytest.fixture
+def proxied_site(tmp_path, monkeypatch):
+    monkeypatch.setenv('SECRET_KEY', 'test-secret')
+    monkeypatch.setenv('TRUST_PROXY', '1')
+    monkeypatch.setenv('TRUSTED_PROXY_IPS', '192.0.2.12/32')
+    path = tmp_path / 'leads.sqlite3'
+    with TestClient(create_app(path), client=('192.0.2.12', 50000)) as client:
+        yield client, path
+
+
 def token(age=4):
     stamp = str(time.time() - age)
     return stamp + '.' + hmac.new(b'test-secret', stamp.encode(), hashlib.sha256).hexdigest()
@@ -215,6 +225,39 @@ def test_rate_limit(site, telegram):
         assert site[0].post('/api/lead', json=data, headers={'X-Forwarded-For': f'1.1.1.{i}'}).status_code == (200 if i < 3 else 429)
 
 
+def test_forwarded_for_spoof_does_not_bypass_limit(site, telegram, monkeypatch):
+    monkeypatch.setenv('TRUST_PROXY', '1')
+    for i in range(4):
+        data = payload()
+        data['phone'] = f'+79991234{i:03d}'
+        assert site[0].post('/api/lead', json=data, headers={'X-Forwarded-For': f'198.51.100.{i}'}).status_code == (200 if i < 3 else 429)
+
+
+def test_form_token_rate_limit(site, monkeypatch):
+    monkeypatch.setenv('TRUST_PROXY', '1')
+    responses = [site[0].get('/api/form-token') for _ in range(31)]
+    assert [response.status_code for response in responses[:30]] == [200] * 30
+    assert responses[-1].status_code == 429
+
+
+@pytest.mark.parametrize('chain,same_ip,other_ip', [
+    (['8.8.8.8, 1.1.1.1'], ['8.8.4.4, 1.1.1.1'], ['8.8.8.8, 1.0.0.1']),
+    (['1.1.1.1, 8.8.8.8, 10.0.0.1'], ['1.1.1.1'], ['8.8.8.8, 10.0.0.1']),
+    (['8.8.8.8', 'unknown, ::ffff:1.1.1.1'], ['1.1.1.1'], ['1.0.0.1']),
+    (['10.0.0.1'], [], ['1.1.1.1']),
+])
+def test_configured_proxy_preserves_separate_client_limits(proxied_site, chain, same_ip, other_ip):
+    client, _ = proxied_site
+
+    def issue_token(values):
+        headers = [('X-Forwarded-For', value) for value in values]
+        return client.get('/api/form-token', headers=headers).status_code
+
+    assert all(issue_token(chain) == 200 for _ in range(30))
+    assert issue_token(same_ip) == 429
+    assert issue_token(other_ip) == 200
+
+
 def test_dedupe(site, telegram):
     assert site[0].post('/api/lead', json=payload()).status_code == 200
     data = payload()
@@ -230,11 +273,10 @@ def test_dedupe(site, telegram):
 
 
 @pytest.mark.parametrize('native', [False, True])
-def test_quota_does_not_disclose_recent_leads(site, telegram, monkeypatch, native):
-    monkeypatch.setenv('TRUST_PROXY', '1')
-    client, _ = site
-    other_ip = {'X-Forwarded-For': '192.0.2.20'}
-    visitor_ip = {'X-Forwarded-For': '192.0.2.10'}
+def test_quota_does_not_disclose_recent_leads(proxied_site, telegram, native):
+    client, _ = proxied_site
+    other_ip = {'X-Forwarded-For': '1.1.1.1'}
+    visitor_ip = {'X-Forwarded-For': '1.0.0.1'}
     recent_phone = '9991234560'
     unused_phone = '9991234564'
     assert client.post('/api/lead', json={**payload(), 'phone': recent_phone}, headers=other_ip).status_code == 200
@@ -270,9 +312,12 @@ def test_delivery_failure_stored(site, telegram, failure):
 
 def test_size_and_headers(site):
     assert site[0].post('/api/lead', content='x'*8193).status_code == 413
+    assert site[0].post('/api/lead', content='x'*8193).headers['x-content-type-options'] == 'nosniff'
     response = site[0].get('/')
     assert response.status_code == 200
     assert response.headers['x-frame-options'] == 'DENY'
+    assert response.headers['permissions-policy'] == 'camera=(), microphone=(), geolocation=()'
+    assert response.headers['strict-transport-security'] == 'max-age=31536000'
     assert 'unsafe-inline' not in response.headers['content-security-policy']
     assert site[0].post('/api/lead', content='[').status_code == 400
     assert site[0].post('/api/lead', json=[]).status_code == 400
@@ -296,3 +341,27 @@ def test_oversized_native_post_returns_a_retryable_form(site, telegram):
     assert retry.status_code == 303
     assert retry.headers['location'] == '/?lead=accepted#lead'
     telegram.assert_called_once()
+
+
+@pytest.mark.parametrize('field,value', [('name', 'A\x00B'), ('name', 'A\r\nB'), ('comment', 'A\x00B'), ('comment', 'A\r\nB'), ('comment', 'A\u2028B')])
+def test_control_characters_rejected(site, telegram, field, value):
+    data = payload()
+    data[field] = value
+    assert site[0].post('/api/lead', json=data).status_code == 400
+    telegram.assert_not_called()
+
+
+def test_native_form_uses_post(site):
+    assert '<form id="lead-form" method="post" action="/api/lead#lead"' in site[0].get('/').text
+
+
+def test_lead_requires_json_content_type(site):
+    response = site[0].post('/api/lead', content='{}', headers={'Content-Type': 'text/plain'})
+    assert response.status_code == 415
+
+
+def test_json_parser_recursion_error_is_bad_request(site):
+    with patch('app.json') as parser:
+        parser.loads.side_effect = RecursionError
+        response = site[0].post('/api/lead', content='{}', headers={'Content-Type': 'application/json'})
+    assert response.status_code == 400
